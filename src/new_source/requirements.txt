@@ -1,0 +1,6 @@
+numpy
+soundcard
+pyqtgraph
+PyQt6
+# optional: PyOpenGL — для OpenGL-бэкенда
+# optional: scipy — быстрый bandpass (без него работает pure-Python fallback)
