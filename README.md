@@ -4,6 +4,7 @@
 
 Высокий FPS, плавная стабилизация, красивые цветовые темы и минималистичный UI.
 
+![Preview2](assets/preview.png)
 ![Preview](assets/preview.gif)
 
 ---
