@@ -14,8 +14,8 @@ ring_l = np.zeros(RING_N * 2, dtype=np.float32)
 ring_r = np.zeros(RING_N * 2, dtype=np.float32)
 ring_m = np.zeros(RING_N * 2, dtype=np.float32)
 
-# Многоканальный ring
-ring_ch = [np.zeros(RING_N * 2, dtype=np.float32) for _ in range(MAX_CH)]
+# Многоканальные кольца выделяются только для реально выбранной раскладки.
+ring_ch = []
 n_channels = [2]
 
 _ring_w = [0]
@@ -69,8 +69,9 @@ def set_channel_count(n: int):
         n_channels[0] = n
         _ring_w[0] = 0
         state["total_samples"] = 0
-        for i in range(MAX_CH):
-            ring_ch[i].fill(0.0)
+        ring_ch[:] = (
+            [np.zeros(RING_N * 2, dtype=np.float32) for _ in range(n)] if n > 2 else []
+        )
         ring_l.fill(0.0)
         ring_r.fill(0.0)
         ring_m.fill(0.0)

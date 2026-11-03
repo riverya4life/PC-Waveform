@@ -73,6 +73,7 @@ DEFAULT_CONFIG = {
     "peak_hold": True,
     "bpm_on": True,
     "smooth_stab": True,
+    "edge_clip": False,
 }
 
 
@@ -117,7 +118,7 @@ def _validate(cfg: dict) -> dict:
     if cfg.get("bandpass") not in ("off", "low", "mid", "high"):
         cfg["bandpass"] = "off"
 
-    for k in ("gradient", "peak_hold", "bpm_on", "smooth_stab"):
+    for k in ("gradient", "peak_hold", "bpm_on", "smooth_stab", "edge_clip"):
         cfg[k] = _bool(cfg.get(k, DEFAULT_CONFIG[k]))
 
     did = cfg.get("device_id")
@@ -155,6 +156,7 @@ def _load_from_ini(path: str):
             "peak_hold",
             "bpm_on",
             "smooth_stab",
+            "edge_clip",
         ):
             if k in s:
                 cfg[k] = s.getboolean(k, DEFAULT_CONFIG[k])
@@ -196,6 +198,7 @@ def _save_config(cfg: dict):
             "peak_hold": "true" if _bool(cfg.get("peak_hold", True)) else "false",
             "bpm_on": "true" if _bool(cfg.get("bpm_on", True)) else "false",
             "smooth_stab": "true" if _bool(cfg.get("smooth_stab", True)) else "false",
+            "edge_clip": "true" if _bool(cfg.get("edge_clip", True)) else "false",
         }
         did = cfg.get("device_id")
         cp["audio"] = {"device_id": "" if did is None else str(did)}
@@ -277,6 +280,9 @@ TRANSLATIONS = {
         "theme_white": "Белый",
         "theme_custom": "Свой цвет",
         "theme_custom_tip": "Выбрать свой цвет темы",
+        "theme_system": "Акцент системы",
+        "theme_system_tip": "Брать цвет из акцента системы и следовать за ним",
+        "theme_system_na": "недоступно на этой системе",
         "theme_close": "Готово",
         "theme_presets": "ПАЛИТРА",
         "settings": "Настройки",
@@ -296,8 +302,10 @@ TRANSLATIONS = {
         "peak_hold_tip": "Огибающая пиков с затуханием",
         "bpm": "BPM",
         "bpm_tip": "Определение темпа",
-        "smooth_stab": "Плавная стабилизация",
+        "smooth_stab": "Плавная стабилизация (БЕТА)",
         "smooth_stab_tip": "Плавная смена кадров; выключено — классическая стабилизация",
+        "edge_clip": "Об края",
+        "edge_clip_tip": "Жестко обрезать пики по границам окна",
     },
     "uk": {
         "brand": "PC Waveform",
@@ -365,6 +373,9 @@ TRANSLATIONS = {
         "theme_white": "Білий",
         "theme_custom": "Свій колір",
         "theme_custom_tip": "Вибрати свій колір теми",
+        "theme_system": "Акцент системи",
+        "theme_system_tip": "Брати колір з акценту системи та слідувати за ним",
+        "theme_system_na": "недоступно в цій системі",
         "theme_close": "Готово",
         "theme_presets": "ПАЛІТРА",
         "settings": "Налаштування",
@@ -386,6 +397,8 @@ TRANSLATIONS = {
         "bpm_tip": "Визначення темпу",
         "smooth_stab": "Плавна стабілізація",
         "smooth_stab_tip": "Плавна зміна кадрів; вимкнено — класична стабілізація",
+        "edge_clip": "Об краї",
+        "edge_clip_tip": "Жорстко обрізати піки по межах вікна",
     },
     "en": {
         "brand": "PC Waveform",
@@ -453,6 +466,9 @@ TRANSLATIONS = {
         "theme_white": "White",
         "theme_custom": "Custom",
         "theme_custom_tip": "Pick a custom theme colour",
+        "theme_system": "System accent",
+        "theme_system_tip": "Use the system accent colour and follow its changes",
+        "theme_system_na": "not available on this system",
         "theme_close": "Done",
         "theme_presets": "PALETTE",
         "settings": "Settings",
@@ -472,8 +488,10 @@ TRANSLATIONS = {
         "peak_hold_tip": "Peak envelope with decay",
         "bpm": "BPM",
         "bpm_tip": "Tempo detection",
-        "smooth_stab": "Smooth stabilization",
+        "smooth_stab": "Smooth stabilization (BETA)",
         "smooth_stab_tip": "Smooth frame transitions; off = classic stabilization",
+        "edge_clip": "Edge clip",
+        "edge_clip_tip": "Hard clip peaks at window bounds",
     },
 }
 

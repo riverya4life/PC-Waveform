@@ -16,7 +16,9 @@ class BpmDetector:
         self.history = deque(maxlen=int(self.HISTORY_S * samplerate / self.HOP))
         self._win = np.hanning(self.WIN).astype(np.float32)
         self._prev_spec = None
-        self._buf = np.zeros(0, dtype=np.float32)
+        self._buf = np.empty(self.WIN + 4096, dtype=np.float32)
+        self._buf_size = 0
+        self._windowed = np.empty(self.WIN, dtype=np.float32)
         self.bpm = 0.0
         self.confidence = 0.0
         self._last_calc = 0.0
@@ -24,18 +26,25 @@ class BpmDetector:
     def feed(self, mono: np.ndarray):
         if mono is None or mono.size == 0:
             return
-        if self._buf.size:
-            self._buf = np.concatenate([self._buf, mono.astype(np.float32, copy=False)])
-        else:
-            self._buf = mono.astype(np.float32, copy=False)
-        while self._buf.size >= self.WIN:
-            self._process(self._buf[: self.WIN])
-            # шаг = HOP (перекрытие 50 %), иначе реальная частота кадров flux
-            # вдвое ниже frame_rate в _compute() и BPM врёт на медленных треках
-            self._buf = self._buf[self.HOP :]
+        data = np.asarray(mono, dtype=np.float32)
+        offset = 0
+        while offset < data.size:
+            count = min(self._buf.size - self._buf_size, data.size - offset)
+            self._buf[self._buf_size : self._buf_size + count] = data[
+                offset : offset + count
+            ]
+            self._buf_size += count
+            offset += count
+            while self._buf_size >= self.WIN:
+                self._process(self._buf[: self.WIN])
+                # Keep the 50% overlap without allocating a new array each hop.
+                remaining = self._buf_size - self.HOP
+                self._buf[:remaining] = self._buf[self.HOP : self._buf_size]
+                self._buf_size = remaining
 
     def _process(self, seg: np.ndarray):
-        spec = np.abs(np.fft.rfft(seg * self._win))
+        np.multiply(seg, self._win, out=self._windowed)
+        spec = np.abs(np.fft.rfft(self._windowed))
         if self._prev_spec is not None and spec.shape == self._prev_spec.shape:
             flux = float(np.maximum(0.0, spec - self._prev_spec).sum())
             self.history.append(flux)

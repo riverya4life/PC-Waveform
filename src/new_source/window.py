@@ -12,6 +12,7 @@ from backend import _BACKEND_ID, _BACKEND_NAME_KEYS, _USE_GL
 from settings import (
     CHANNEL_LAYOUTS,
     CH_LAYOUT_TO_N,
+    CHUNK,
     CONFIG,
     DEFAULT_CONFIG,
     DEMO_EDGE,
@@ -48,6 +49,7 @@ from theme import (
     _rgba,
     _stereo_r_color,
     _surface,
+    system_accent,
     make_qss,
 )
 from audio import (
@@ -114,6 +116,67 @@ def _demo_envelope(t_norm: np.ndarray) -> np.ndarray:
     return _demo_edge_window(t_norm, edge=DEMO_EDGE).astype(np.float32)
 
 
+class FpsFreezeTile(QtWidgets.QFrame):
+    """Плитка: слева FPS, справа кнопка «Заморозить/Продолжить»."""
+
+    def __init__(self, width: int, button, parent=None):
+        super().__init__(parent)
+        self.setObjectName("tile")
+        self.setFixedWidth(width)
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(14, 8, 9, 8)
+        lay.setSpacing(10)
+        self.info = MiniTile()
+        lay.addWidget(self.info, 1)
+        lay.addWidget(button, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
+
+    def set(self, cap: str, val_html: str):
+        self.info.set(cap, val_html)
+
+
+class MiniTile(QtWidgets.QWidget):
+    """Подплитка без рамки (подпись + значение) — часть PairTile."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(3)
+        self.cap = QtWidgets.QLabel()
+        self.cap.setObjectName("tilecap")
+        self.val = QtWidgets.QLabel()
+        self.val.setObjectName("tileval")
+        self.val.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        lay.addWidget(self.cap)
+        lay.addWidget(self.val)
+
+    def set(self, cap: str, val_html: str):
+        if self.cap.text() != cap:
+            self.cap.setText(cap)
+        if self.val.text() != val_html:
+            self.val.setText(val_html)
+
+
+class PairTile(QtWidgets.QFrame):
+    """Одна плитка с двумя значениями: слева RMS, справа частота."""
+
+    def __init__(self, width: int, parent=None):
+        super().__init__(parent)
+        self.setObjectName("tile")
+        self.setFixedWidth(width)
+        lay = QtWidgets.QHBoxLayout(self)
+        lay.setContentsMargins(14, 10, 14, 11)
+        lay.setSpacing(12)
+        self.left = MiniTile()
+        self.right = MiniTile()
+        sep = QtWidgets.QFrame()
+        sep.setFixedWidth(1)
+        sep.setStyleSheet("background: rgba(255,255,255,22); border: none;")
+        lay.addWidget(self.left, 1)
+        lay.addWidget(sep)
+        lay.addWidget(self.right, 1)
+
+
 class MainWindow(TriggerMixin, QtWidgets.QWidget):
     CTRL_H = 36
     ROW_H = 54
@@ -123,14 +186,19 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
     SOLO_W = 450
     SOLO_H = 150
     CURVE_DS_FACTOR = 1.0
-    TRIG_BLEND_TAU = 0.022  # с: плавность смены кадров в режиме стабилизации
+    COL_W = 300  # ширина правой колонки со статистикой (и блока «Поток» внизу)
+    SHOW_HEADER = True  # логотип, заголовок и «пилюля» устройства сверху
+    SHOW_DEBUG = (
+        # отладочная плашка: размер окна и масштаб (F12 — скрыть/показать)
+        False
+    )
+    TRIG_BLEND_TAU = 0.032  # с: плавность смены кадров в режиме стабилизации
 
     def __init__(self):
         super().__init__()
         self.setObjectName("root")
         self.setWindowTitle(tr("main_title"))
-        self.resize(1040, 700)
-        self.setMinimumSize(640, 560)
+        self.resize(1280, 548)
 
         self.n = CONFIG.get("n", 4096)
         self.frozen = False
@@ -145,6 +213,7 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         self.lim = 1.0
         self.prev_tpl = None
         self._crossing_smooth = None
+        self._trigger_pending_samples = 0
         self._last_total = 0
         self._period_smooth = 0.0
         self._lock_quality = 0.0
@@ -180,12 +249,15 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         self._peak_hold = PeakHold(decay=0.94, smooth=0.5, window=15)
         self._peak_hold_r = PeakHold(decay=0.94, smooth=0.5, window=15)
         self._sm_bufs = {}
+        self._sm_out = {}
+        self._sm_scale = {}
         self._sm_tmp = None
         self._last_frame_t = 0.0
         self._bpm_scr = np.empty(4096, dtype=np.float32)
         self._show_gradient = bool(CONFIG.get("gradient", False))
         self._show_peak_hold = bool(CONFIG.get("peak_hold", True))
         self._smooth_stab = bool(CONFIG.get("smooth_stab", True))
+        self._edge_clip_on = bool(CONFIG.get("edge_clip", True))
 
         self.multi_curves = []
         self.multi_peak_curves = []
@@ -219,12 +291,10 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         self.theme_id = CONFIG.get("theme", DEFAULT_THEME)
         self.theme_btns = {}
         self._theme_dialog = None
-        if self.theme_id == "custom":
-            self.accent = str(
-                CONFIG.get("custom_color", DEFAULT_CONFIG["custom_color"])
-            )
-        else:
-            self.accent = THEME_HEX.get(self.theme_id, THEME_HEX[DEFAULT_THEME])
+        self._sys_last = None
+        self._sys_applied = None
+        self._sys_timer = None
+        self.accent = self._theme_color(self.theme_id)
         self._current_color = QtGui.QColor(self.accent)
         self._theme_anim = None
         self._stereo_r_hex = _stereo_r_color(self.accent).name()
@@ -276,6 +346,38 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         self._solo_esc.setContext(QtCore.Qt.ShortcutContext.ApplicationShortcut)
         self._solo_esc.setEnabled(False)
 
+    def _toggle_debug(self):
+        self.SHOW_DEBUG = not self.SHOW_DEBUG
+        if self.SHOW_HEADER:
+            self.dbg_lbl.setVisible(self.SHOW_DEBUG)
+        self._update_debug()
+        self._fit_pill()
+
+    def _update_debug(self):
+        if not self.SHOW_DEBUG or not self.SHOW_HEADER:
+            return
+        w, h = self.width(), self.height()
+        dpr = self.devicePixelRatioF()
+        dpi = self.logicalDpiX()
+        txt = (
+            f"{w}×{h} · {round(dpr * 100)}% · "
+            f"{round(w * dpr)}×{round(h * dpr)} px · {dpi:.0f} dpi"
+        )
+        if self.dbg_lbl.text() != txt:
+            self.dbg_lbl.setText(txt)
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        wh = self.windowHandle()
+        if wh is not None and not getattr(self, "_dbg_hooked", False):
+            self._dbg_hooked = True
+            try:
+                wh.screenChanged.connect(lambda *_: self._update_debug())
+            except Exception:
+                pass
+        self._update_debug()
+        self._fit_pill()
+
     def _alloc_scratch(self, n):
         f = np.float32
         self._scr_t = np.empty(n * 2, f)
@@ -286,7 +388,9 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         self._dec_x = np.empty(n, f)
         self._dec_y = np.empty(n, f)
 
-        self._multi_bufs = [np.empty(n * 2, f) for _ in range(MAX_CH)]
+        self._multi_bufs = (
+            [np.empty(n * 2, f) for _ in range(self._n_ch)] if self._n_ch > 2 else []
+        )
 
         if self._n_ch == 2:
             self._scr_l = np.empty(n * 2, f)
@@ -309,15 +413,11 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
             _trim_memory()
 
     def _fit_pill(self):
-        if not hasattr(self, "pill"):
-            return
-        used = (
-            52 + self.logo.width() + 14 + self.title_holder.sizeHint().width() + 14 + 12
-        )
-        self.pill.setFixedWidth(max(220, min(480, self.width() - used)))
+        pass
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
+        self._update_debug()
         self._fit_pill()
 
     def _save_settings(self):
@@ -336,6 +436,7 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         CONFIG["gradient"] = self._show_gradient
         CONFIG["peak_hold"] = self._show_peak_hold
         CONFIG["bpm_on"] = self._bpm_on
+        CONFIG["edge_clip"] = self._edge_clip_on
         idx = self.device_combo.currentIndex()
         if idx >= 0:
             CONFIG["device_id"] = self.device_combo.itemData(idx)
@@ -519,6 +620,7 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
                 getattr(self, "peak_hold_sw", None),
                 getattr(self, "bpm_sw", None),
                 getattr(self, "smooth_sw", None),
+                getattr(self, "edge_clip_sw", None),
             ):
                 if sw is not None:
                     sw.setText("")
@@ -528,12 +630,15 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
                 self._cap_glow.setText(tr("glow"))
             if getattr(self, "_cap_fade", None):
                 self._cap_fade.setText(tr("fade"))
+            if getattr(self, "_cap_edge", None):
+                self._cap_edge.setText(tr("edge_clip"))
         if self.cap_window:
             self.cap_window.setText(tr("window"))
         if self.cap_gain:
             self.cap_gain.setText(tr("gain"))
         self.cap_stream.setText(tr("stream"))
-        self.cap_theme.setText(tr("theme"))
+        if self.cap_theme:
+            self.cap_theme.setText(tr("theme"))
         if self.cap_lang:
             self.cap_lang.setText(tr("language"))
         if self.cap_channels:
@@ -545,6 +650,8 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
             self.settings_btn.setToolTip(tr("settings_tip"))
         if hasattr(self, "cap_settings") and self.cap_settings:
             self.cap_settings.setText(cap_text("settings"))
+        if hasattr(self, "edge_clip_sw"):
+            self.edge_clip_sw.setToolTip(tr("edge_clip_tip"))
 
         if hasattr(self, "ch_layout_combo"):
             for i, (_key, _n, label) in enumerate(CHANNEL_LAYOUTS):
@@ -560,9 +667,12 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         self.n_combo.blockSignals(False)
         if hasattr(self, "theme_btns"):
             for tid, btn in self.theme_btns.items():
-                btn.setToolTip(
-                    tr("theme_custom_tip") if tid == "custom" else tr(f"theme_{tid}")
-                )
+                if tid == "custom":
+                    btn.setToolTip(tr("theme_custom_tip"))
+                elif tid == "system":
+                    btn.setToolTip(tr("theme_system_tip"))
+                else:
+                    btn.setToolTip(tr(f"theme_{tid}"))
         if not self.device_combo.isEnabled() and self.device_combo.count() == 1:
             self.device_combo.blockSignals(True)
             self.device_combo.setItemText(0, tr("no_devices"))
@@ -650,6 +760,7 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         self.card.setAttribute(
             QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, False
         )
+        self.card.setAttribute(QtCore.Qt.WidgetAttribute.WA_NoSystemBackground, False)
         self.card.setWindowFlags(QtCore.Qt.WindowType.Widget)
         self.card.setWindowTitle("")
         self.card.setStyleSheet("")
@@ -668,7 +779,8 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         if self._plot_bg_main is not None:
             self.plot.setBackground(self._plot_bg_main)
         self._apply_plot_render_mode()
-        self._root_layout.insertWidget(1, self.card)
+        self._top_layout.insertWidget(0, self.card, 1)
+        self.plot.setStyleSheet("background: transparent;")
         self.show()
         self.card.show()
         self.raise_()
@@ -1084,7 +1196,13 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         self.glow.set_accent(c)
         if hasattr(self, "fade_sw"):
             self.fade_sw.set_accent(c)
-        for attr in ("gradient_sw", "peak_hold_sw", "bpm_sw", "smooth_sw"):
+        for attr in (
+            "gradient_sw",
+            "peak_hold_sw",
+            "bpm_sw",
+            "smooth_sw",
+            "edge_clip_sw",
+        ):
             w = getattr(self, attr, None)
             if w is not None:
                 w.set_accent(c)
@@ -1108,9 +1226,39 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
             dlg.setStyleSheet(self._theme_dialog_qss())
 
     def _theme_color(self, theme_id: str) -> str:
+        if theme_id == "system":
+            c = system_accent() or self._sys_last or THEME_HEX[DEFAULT_THEME]
+            self._sys_last = c
+            return c
         if theme_id == "custom":
             return str(CONFIG.get("custom_color", DEFAULT_CONFIG["custom_color"]))
         return THEME_HEX.get(theme_id, THEME_HEX[DEFAULT_THEME])
+
+    SYS_POLL_MS = 2000
+
+    def _sync_system_watch(self):
+        if self._sys_timer is None:
+            tm = QtCore.QTimer(self)
+            tm.setTimerType(QtCore.Qt.TimerType.VeryCoarseTimer)
+            tm.setInterval(self.SYS_POLL_MS)
+            tm.timeout.connect(self._poll_system_accent)
+            self._sys_timer = tm
+        if self.theme_id == "system":
+            if not self._sys_timer.isActive():
+                self._sys_timer.start()
+        else:
+            self._sys_timer.stop()
+
+    def _poll_system_accent(self):
+        if self.theme_id != "system":
+            return
+        new = self._theme_color("system")
+        if new == self._sys_applied:
+            return
+        self._sys_applied = new
+        self._animate_theme(new)
+        if getattr(self, "_theme_dialog", None):
+            self._refresh_theme_dialog_texts()
 
     def _apply_theme(self, theme_id: str, animate: bool = True):
         btns = getattr(self, "theme_btns", None)
@@ -1118,6 +1266,8 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
             btns[theme_id].setChecked(True)
         self.theme_id = theme_id
         target = self._theme_color(theme_id)
+        self._sys_applied = target if theme_id == "system" else None
+        self._sync_system_watch()
         if animate:
             self._animate_theme(target)
         else:
@@ -1156,6 +1306,20 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         title_box.addWidget(self.sub_lbl)
         header.addWidget(self.title_holder)
         header.addStretch(1)
+        self.dbg_lbl = QtWidgets.QLabel("")
+        self.dbg_lbl.setObjectName("dbg")
+        self.dbg_lbl.setStyleSheet(
+            "QLabel#dbg { color: #d29922; background: rgba(210,153,34,24);"
+            " border: 1px solid rgba(210,153,34,90); border-radius: 10px;"
+            " padding: 3px 10px; font-family: 'Cascadia Mono', 'Consolas', monospace;"
+            " font-size: 11px; }"
+        )
+        self.dbg_lbl.setToolTip(
+            "Debug: размер окна (логические px) · масштаб экрана · физические px · DPI\n"
+            "F12 — скрыть/показать"
+        )
+        self.dbg_lbl.setVisible(self.SHOW_DEBUG)
+        header.addWidget(self.dbg_lbl, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
         self.pill = QtWidgets.QFrame()
         self.pill.setObjectName("pill")
         self.pill.setFixedHeight(32)
@@ -1173,8 +1337,24 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         self.device_err = False
         pill_l.addWidget(self.dot, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
         pill_l.addWidget(self.device_lbl, 1)
-        header.addWidget(self.pill, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
-        root.addLayout(header)
+        self.pill.setMinimumWidth(220)
+        self.pill.setMaximumWidth(480)
+        self.pill.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed
+        )
+        header.addWidget(self.pill, 1, QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self._header_layout = header
+        if self.SHOW_HEADER:
+            root.addLayout(header)
+        else:
+            for w in (self.logo, self.title_holder, self.pill, self.dbg_lbl):
+                w.setParent(self)
+                w.hide()
+
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(14)
+        self._top_layout = top
+        root.addLayout(top, 1)
 
         self.card = QtWidgets.QFrame()
         self.card.setObjectName("card")
@@ -1183,6 +1363,7 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         card_l = QtWidgets.QVBoxLayout(self.card)
         card_l.setContentsMargins(10, 14, 16, 8)
         self._card_layout = card_l
+        self.card.setMinimumSize(300, 160)
         self.bottom = SpacedAxis("bottom")
         self.left = SpacedAxis("left")
         self.plot = WavePlotWidget(axisItems={"bottom": self.bottom, "left": self.left})
@@ -1245,7 +1426,7 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
             self.glow_renderer_r.set_enabled(True)
 
         card_l.addWidget(self.plot)
-        root.addWidget(self.card, 1)
+        top.addWidget(self.card, 1)
         self.plot.installEventFilter(self)
         try:
             self.plot.viewport().installEventFilter(self)
@@ -1254,48 +1435,38 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         self.card.installEventFilter(self)
         self._build_solo_hud()
 
-        self.panel = QtWidgets.QFrame()
-        self.panel.setObjectName("panel")
-        panel_l = QtWidgets.QVBoxLayout(self.panel)
-        panel_l.setContentsMargins(20, 16, 20, 16)
-        ctl = FlowLayout(hspacing=22, vspacing=14)
-        panel_l.addLayout(ctl)
-
         self.freeze_btn = QtWidgets.QPushButton(self._freeze_text(False))
         self.freeze_btn.setObjectName("primary")
         self.freeze_btn.setCheckable(True)
         self.freeze_btn.setFocusPolicy(no_focus)
         self.freeze_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.freeze_btn.setFixedHeight(self.ROW_H)
-        self.freeze_btn.setIconSize(QtCore.QSize(18, 18))
+        self.freeze_btn.setFixedSize(140, self.CTRL_H)
+        self.freeze_btn.setIconSize(QtCore.QSize(16, 16))
         self.freeze_btn.toggled.connect(self.on_freeze)
-        ctl.addWidget(self.freeze_btn)
+
+        self.theme_btn = QtWidgets.QPushButton(tr("theme"))
+        self.theme_btn.setFocusPolicy(no_focus)
+        self.theme_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.theme_btn.setFixedSize((self.COL_W - 12) // 2, self.CTRL_H)
+        self.theme_btn.clicked.connect(self._open_theme_dialog)
+        self.cap_theme = None
+
+        self.settings_btn = QtWidgets.QPushButton(tr("settings"))
+        self.settings_btn.setFocusPolicy(no_focus)
+        self.settings_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.settings_btn.setFixedSize((self.COL_W - 12) // 2, self.CTRL_H)
+        self.settings_btn.setToolTip(tr("settings_tip"))
+        self.settings_btn.clicked.connect(self._open_settings_dialog)
+        self.cap_settings = None
 
         self.device_combo = QtWidgets.QComboBox()
-        self.device_combo.setMinimumWidth(210)
         self.device_combo.setFixedHeight(self.CTRL_H)
         self.device_combo.setFocusPolicy(no_focus)
         self.device_combo.currentIndexChanged.connect(self._on_device_change)
         self._style_combo_popup(self.device_combo)
         holder, self.cap_stream = self._caption_holder("stream", self.device_combo)
-        ctl.addWidget(holder)
-
-        self.theme_btn = QtWidgets.QPushButton(tr("theme"))
-        self.theme_btn.setFocusPolicy(no_focus)
-        self.theme_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.theme_btn.setFixedHeight(self.CTRL_H)
-        self.theme_btn.clicked.connect(self._open_theme_dialog)
-        holder, self.cap_theme = self._caption_holder("theme", self.theme_btn)
-        ctl.addWidget(holder)
-
-        self.settings_btn = QtWidgets.QPushButton(tr("settings"))
-        self.settings_btn.setFocusPolicy(no_focus)
-        self.settings_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self.settings_btn.setFixedHeight(self.CTRL_H)
-        self.settings_btn.setToolTip(tr("settings_tip"))
-        self.settings_btn.clicked.connect(self._open_settings_dialog)
-        holder, self.cap_settings = self._caption_holder("settings", self.settings_btn)
-        ctl.addWidget(holder)
+        holder.setFixedWidth(self.COL_W)
+        self.stream_holder = holder
 
         self.trigger = ToggleSwitch(tr("stabilization"), self)
         self.trigger.setChecked(CONFIG.get("stabilization", True))
@@ -1335,6 +1506,13 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         self.smooth_sw.toggled.connect(self._on_smooth_toggle)
         self.trigger.toggled.connect(self.smooth_sw.setEnabled)
         self.smooth_sw.hide()
+
+        self.edge_clip_sw = ToggleSwitch("", self)
+        self.edge_clip_sw.setChecked(self._edge_clip_on)
+        self.edge_clip_sw.setEnabled(self.trigger.isChecked())
+        self.edge_clip_sw.toggled.connect(self._on_edge_clip_toggle)
+        self.trigger.toggled.connect(self.edge_clip_sw.setEnabled)
+        self.edge_clip_sw.hide()
 
         self.band_combo = QtWidgets.QComboBox(self)
         self.band_combo.addItem(tr("band_off"), "off")
@@ -1430,29 +1608,43 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         self.cap_lang = None
         self._settings_dialog = None
 
-        root.addWidget(self.panel)
-
-        stats = FlowLayout(hspacing=12, vspacing=10)
-        self.peak_tile = StatTile(290)
-        self.rms_tile = StatTile(160)
-        self.hz_tile = StatTile(130)
-        self.bpm_tile = StatTile(110)
-        self.info_tile = StatTile(240)
-        self.fps_tile = StatTile(110)
-        self.bknd_tile = StatTile(140)
+        col = QtWidgets.QVBoxLayout()
+        col.setSpacing(12)
+        self._stats_layout = col
+        self.peak_tile = StatTile(self.COL_W)
+        self.bpm_tile = StatTile(self.COL_W)
+        self.rms_hz_tile = PairTile(self.COL_W)
+        self.rms_tile = self.rms_hz_tile.left
+        self.hz_tile = self.rms_hz_tile.right
+        self.info_tile = StatTile(self.COL_W)
+        self.fps_tile = FpsFreezeTile(self.COL_W, self.freeze_btn)
         self.hz_tile.setToolTip(tr("hz_tip"))
         self.bpm_tile.setToolTip(tr("bpm_tip"))
-        for t in (
+        for tile in (
             self.peak_tile,
-            self.rms_tile,
-            self.hz_tile,
             self.bpm_tile,
+            self.rms_hz_tile,
             self.info_tile,
             self.fps_tile,
-            self.bknd_tile,
         ):
-            stats.addWidget(t)
-        root.addLayout(stats)
+            tile.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Fixed
+            )
+            tile.setFixedHeight(54)
+            col.addWidget(tile)
+        col.addSpacing(6)
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(12)
+        btn_row.addWidget(self.theme_btn)
+        btn_row.addWidget(self.settings_btn)
+        col.addLayout(btn_row)
+        col.addWidget(self.stream_holder)
+        col.addStretch(1)
+        top.addLayout(col, 0)
+
+        self.bknd_tile = StatTile(140)
+        self.bknd_tile.setParent(self)
+        self.bknd_tile.hide()
 
     @staticmethod
     def _style_combo_popup(combo):
@@ -1576,6 +1768,8 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         c3.addWidget(self._settings_sep())
         c3.addWidget(self._settings_row("smooth_stab", self.smooth_sw))
         c3.addWidget(self._settings_sep())
+        c3.addWidget(self._settings_row("edge_clip", self.edge_clip_sw, "_cap_edge"))
+        c3.addWidget(self._settings_sep())
         c3.addWidget(self._settings_row("glow", self.glow, "_cap_glow"))
         c3.addWidget(self._settings_sep())
         c3.addWidget(self._settings_row("fade", self.fade_sw, "_cap_fade"))
@@ -1618,6 +1812,7 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
             self.peak_hold_sw,
             self.bpm_sw,
             self.smooth_sw,
+            self.edge_clip_sw,
         ):
             w.setVisible(True)
             w.show()
@@ -1636,6 +1831,7 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
             self.peak_hold_sw,
             self.bpm_sw,
             self.smooth_sw,
+            self.edge_clip_sw,
         ):
             sw.setText("")
             sw.setMinimumWidth(sw.TW + 4)
@@ -1669,6 +1865,7 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
             self.peak_hold_sw,
             self.bpm_sw,
             self.smooth_sw,
+            self.edge_clip_sw,
         ):
             w.setVisible(True)
             w.show()
@@ -1695,6 +1892,8 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
             self._cap_glow.setText(tr("glow"))
         if getattr(self, "_cap_fade", None):
             self._cap_fade.setText(tr("fade"))
+        if getattr(self, "_cap_edge", None):
+            self._cap_edge.setText(tr("edge_clip"))
         for sw in (
             self.trigger,
             self.glow,
@@ -1703,10 +1902,12 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
             self.peak_hold_sw,
             self.bpm_sw,
             self.smooth_sw,
+            self.edge_clip_sw,
         ):
             sw.setText("")
         self.trigger.setToolTip(tr("stabilization_tip"))
         self.fade_sw.setToolTip(tr("fade_tip"))
+        self.edge_clip_sw.setToolTip(tr("edge_clip_tip"))
         self.band_combo.setToolTip(tr("bandpass_tip"))
         self.bpm_tile.setToolTip(tr("bpm_tip"))
         self.band_combo.setItemText(0, tr("band_off"))
@@ -1726,6 +1927,7 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
             self.peak_hold_sw,
             self.bpm_sw,
             self.smooth_sw,
+            self.edge_clip_sw,
         ):
             sw.set_accent(self.accent)
         idx = self.n_combo.currentIndex()
@@ -1824,6 +2026,39 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         card_l.addWidget(grid_w)
         lay.addWidget(card)
 
+        sys_hex = system_accent()
+        self._theme_system_btn = QtWidgets.QPushButton()
+        self._theme_system_btn.setObjectName("thCustom")
+        self._theme_system_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self._theme_system_btn.clicked.connect(lambda: self._apply_theme("system"))
+        system_inner = QtWidgets.QHBoxLayout(self._theme_system_btn)
+        system_inner.setContentsMargins(4, 2, 8, 2)
+        system_inner.setSpacing(12)
+        self.system_swatch = Swatch(sys_hex or THEME_HEX[DEFAULT_THEME])
+        self.system_swatch.setFixedSize(30, 30)
+        self.system_swatch.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_TransparentForMouseEvents
+        )
+        system_inner.addWidget(self.system_swatch)
+        system_txt_box = QtWidgets.QVBoxLayout()
+        system_txt_box.setSpacing(1)
+        self._theme_system_title = QtWidgets.QLabel(tr("theme_system"))
+        self._theme_system_title.setStyleSheet(
+            "font-size: 12px; font-weight: 600; color: #e6edf3; background: transparent;"
+        )
+        self._theme_system_hex = QtWidgets.QLabel(sys_hex or tr("theme_system_na"))
+        self._theme_system_hex.setStyleSheet(
+            "font-size: 11px; color: #8b949e; background: transparent; font-family: 'Cascadia Mono', 'Consolas', monospace;"
+        )
+        system_txt_box.addWidget(self._theme_system_title)
+        system_txt_box.addWidget(self._theme_system_hex)
+        system_inner.addLayout(system_txt_box)
+        system_inner.addStretch(1)
+        group.addButton(self.system_swatch)
+        self.theme_btns["system"] = self.system_swatch
+        self._theme_system_btn.setEnabled(sys_hex is not None)
+        lay.addWidget(self._theme_system_btn)
+
         self._theme_custom_btn = QtWidgets.QPushButton()
         self._theme_custom_btn.setObjectName("thCustom")
         self._theme_custom_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
@@ -1879,9 +2114,18 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         self._theme_dlg_title.setText(tr("theme"))
         self._theme_dlg_close.setText(tr("theme_close"))
         self._theme_custom_title.setText(tr("theme_custom"))
+        self._theme_system_title.setText(tr("theme_system"))
+        sys_hex = system_accent()
+        self._theme_system_btn.setEnabled(sys_hex is not None)
+        self._theme_system_btn.setToolTip(tr("theme_system_tip"))
+        self._theme_system_hex.setText(sys_hex or tr("theme_system_na"))
+        if sys_hex:
+            self.system_swatch.set_color(sys_hex)
         for tid, btn in self.theme_btns.items():
             if tid == "custom":
                 btn.setToolTip(tr("theme_custom_tip"))
+            elif tid == "system":
+                btn.setToolTip(tr("theme_system_tip"))
             else:
                 btn.setToolTip(tr(f"theme_{tid}"))
                 if hasattr(btn, "_name_lbl"):
@@ -1891,6 +2135,9 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         if self.theme_id == "custom":
             name = tr("theme_custom")
             hex_c = CONFIG.get("custom_color", "")
+        elif self.theme_id == "system":
+            name = tr("theme_system")
+            hex_c = self._theme_color("system")
         else:
             name = tr(f"theme_{self.theme_id}")
             hex_c = THEME_HEX.get(self.theme_id, "")
@@ -2014,6 +2261,13 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         self._sm_bufs.clear()
         self._hold_samples = 0
         CONFIG["smooth_stab"] = self._smooth_stab
+        _save_config(CONFIG)
+
+    def _on_edge_clip_toggle(self, on):
+        self._edge_clip_on = bool(on)
+        self._sm_bufs.clear()
+        self._sm_scale.clear()
+        CONFIG["edge_clip"] = self._edge_clip_on
         _save_config(CONFIG)
 
     def _on_bpm_toggle(self, on):
@@ -2151,6 +2405,35 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
                 self._last_keepalive = t
                 self.plot.viewport().update()
 
+    def _trigger_position(self, data, shift, need, n):
+        if not self._smooth_stab:
+            found = self.find_trigger(data, shift)
+            self._hold_samples = 0
+            return found
+
+        force_search = shift <= 0 or self._crossing_smooth is None
+        if force_search:
+            self._trigger_pending_samples = 0
+        else:
+            self._trigger_pending_samples += shift
+
+        trigger_interval = max(2 * CHUNK, SAMPLERATE // 60)
+        if force_search or self._trigger_pending_samples >= trigger_interval:
+            self._trigger_pending_samples = 0
+            found = self.find_trigger(data, shift)
+            if found is None:
+                return self._hold_trigger(shift, need, n)
+            self._hold_samples = 0
+            return found
+
+        found = self._hold_trigger(shift, need, n)
+        if found is None:
+            self._trigger_pending_samples = 0
+            found = self.find_trigger(data, shift)
+            if found is not None:
+                self._hold_samples = 0
+        return found
+
     def update_frame(self):
         if self._ui_hidden():
             if not self._was_hidden:
@@ -2194,6 +2477,7 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
             self._show_gradient,
             self._show_peak_hold,
             self._band_kind,
+            self._edge_clip_on,
         )
 
         if (
@@ -2217,6 +2501,16 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
         self._last_frame_t = now_t
         blend_a = 1.0 - math.exp(-dt / self.TRIG_BLEND_TAU)
         blend_on = trig_on and self._smooth_stab
+
+        if self._edge_clip_on:
+            # Включено: размер амплитуды в зависимости от усиления, пики бьются об края "прям жёстко"
+            clip_lim = float("inf") if blend_on else self.lim
+            blend_lim = self.lim
+        else:
+            # Выключено: обычный режим (за основу взята бывшая включенная настройка)
+            clip_lim = self.lim
+            blend_lim = self.lim
+
         if not blend_on and self._sm_bufs:
             self._sm_bufs.clear()
 
@@ -2258,14 +2552,9 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
             self._last_total = total
             start = 0
             if trig_on:
-                # триггер по mid (L+R)/2, одно смещение на все каналы
                 start = n
                 x = self._x
-                found = self.find_trigger(self._scr_t[:need], shift)
-                if found is None and self._smooth_stab:
-                    found = self._hold_trigger(shift, need, n)
-                else:
-                    self._hold_samples = 0
+                found = self._trigger_position(self._scr_t[:need], shift, need, n)
                 if found is not None:
                     start, x_off = found
                     start = max(0, min(start, need - n))
@@ -2288,10 +2577,10 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
                     filtered = self._filt_out[:n]
                 else:
                     filtered = src
-                np.clip(filtered, -self.lim, self.lim, out=self._disp_buf[:n])
+                np.clip(filtered, -clip_lim, clip_lim, out=self._disp_buf[:n])
                 yl = self._decimate(self._disp_buf[:n], ds, m, self._dec_y)
                 if blend_on:
-                    yl = self._blend_frame(i, yl, blend_a)
+                    yl = self._blend_frame(i, yl, blend_a, blend_lim)
 
                 if _absmax(yl) < 1e-6:
                     curve_item.setVisible(False)
@@ -2338,11 +2627,7 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
             if trig_on:
                 start = n
                 x = self._x
-                found = self.find_trigger(data_t, shift)
-                if found is None and self._smooth_stab:
-                    found = self._hold_trigger(shift, need, n)
-                else:
-                    self._hold_samples = 0
+                found = self._trigger_position(data_t, shift, need, n)
                 if found is not None:
                     start, x_off = found
                     start = max(0, min(start, need - n))
@@ -2373,27 +2658,27 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
                 if self._filters[0] is not None:
                     self._filters[0].process(view_l, self._filt_out[:n])
                     np.clip(
-                        self._filt_out[:n], -self.lim, self.lim, out=self._disp_buf[:n]
+                        self._filt_out[:n], -clip_lim, clip_lim, out=self._disp_buf[:n]
                     )
                 else:
-                    np.clip(view_l, -self.lim, self.lim, out=self._disp_buf[:n])
+                    np.clip(view_l, -clip_lim, clip_lim, out=self._disp_buf[:n])
 
                 if self._filters[1] is not None:
                     self._filters[1].process(view_r, self._filt_out[:n])
                     np.clip(
                         self._filt_out[:n],
-                        -self.lim,
-                        self.lim,
+                        -clip_lim,
+                        clip_lim,
                         out=self._disp_buf_r[:n],
                     )
                 else:
-                    np.clip(view_r, -self.lim, self.lim, out=self._disp_buf_r[:n])
+                    np.clip(view_r, -clip_lim, clip_lim, out=self._disp_buf_r[:n])
 
                 yl = self._decimate(self._disp_buf[:n], ds, m, self._dec_y)
                 yr = self._decimate(self._disp_buf_r[:n], ds, m, self._dec_yr)
                 if blend_on:
-                    yl = self._blend_frame("l", yl, blend_a)
-                    yr = self._blend_frame("r", yr, blend_a)
+                    yl = self._blend_frame("l", yl, blend_a, blend_lim)
+                    yr = self._blend_frame("r", yr, blend_a, blend_lim)
                 self.curve.setData(xd, yl, skipFiniteCheck=True)
                 self.curve_r.setData(xd, yr, skipFiniteCheck=True)
                 self.glow_renderer.update(xd, yl, vb, self.lim)
@@ -2413,14 +2698,14 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
                 if self._filters[0] is not None:
                     self._filters[0].process(view, self._filt_out[:n])
                     np.clip(
-                        self._filt_out[:n], -self.lim, self.lim, out=self._disp_buf[:n]
+                        self._filt_out[:n], -clip_lim, clip_lim, out=self._disp_buf[:n]
                     )
                 else:
-                    np.clip(view, -self.lim, self.lim, out=self._disp_buf[:n])
+                    np.clip(view, -clip_lim, clip_lim, out=self._disp_buf[:n])
 
                 yl = self._decimate(self._disp_buf[:n], ds, m, self._dec_y)
                 if blend_on:
-                    yl = self._blend_frame("l", yl, blend_a)
+                    yl = self._blend_frame("l", yl, blend_a, blend_lim)
                 self.curve.setData(xd, yl, skipFiniteCheck=True)
                 if self.curve_r.isVisible():
                     self.curve_r.clear()
@@ -2445,7 +2730,7 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
 
     @staticmethod
     def _draw_peak(curve, ph, y, xd, dt):
-        env = ph.update(y, dt)  # огибающая живёт и на тишине — плавно спадает
+        env = ph.update(y, dt)
         if _absmax(y) < 1e-6:
             if curve.isVisible():
                 curve.setVisible(False)
@@ -2454,21 +2739,53 @@ class MainWindow(TriggerMixin, QtWidgets.QWidget):
             curve.setVisible(True)
         curve.setData(xd, env, skipFiniteCheck=True)
 
-    def _blend_frame(self, key, y, a):
-        """Экспоненциальное смешивание соседних кадров (по времени, не по числу
-        кадров): при смене фазы/захвата триггера волна перетекает, а не прыгает."""
+    def _blend_frame(self, key, y, a, lim=None):
+        """Смешивание кадров с компенсацией амплитуды.
+        Восстанавливает исходный размер волны, а затем обрезает по lim,
+        создавая эффект 'удара об края' (плоские вершины)."""
         buf = self._sm_bufs.get(key)
         if buf is None or buf.shape != y.shape:
             buf = self._sm_bufs[key] = np.array(y, dtype=np.float32)
-            return buf
-        tmp = self._sm_tmp
-        if tmp is None or tmp.shape[0] < y.shape[0]:
-            tmp = self._sm_tmp = np.empty(max(y.shape[0], 1024), dtype=np.float32)
-        t = tmp[: y.shape[0]]
-        np.subtract(y, buf, out=t)
-        t *= a
-        buf += t
-        return buf
+            res = buf
+        elif a >= 0.999:
+            buf[:] = y
+            res = y
+        else:
+            tmp = self._sm_tmp
+            if tmp is None or tmp.shape[0] < y.shape[0]:
+                tmp = self._sm_tmp = np.empty(max(y.shape[0], 1024), dtype=np.float32)
+            t = tmp[: y.shape[0]]
+            np.subtract(y, buf, out=t)
+            t *= a
+            buf += t
+            res = buf
+
+        if lim is None:
+            return res
+
+        out = self._sm_out.get(key)
+        if out is None or out.shape != res.shape:
+            out = self._sm_out[key] = np.empty(res.shape, dtype=np.float32)
+
+        if res is y:
+            out[:] = y
+        else:
+            pk_b = _absmax(res)
+            pk_y = _absmax(y)
+            if pk_b > 1e-6 and pk_y > 1e-6:
+                s = min(max(pk_y / pk_b, 0.5), 2.0)
+                ps = self._sm_scale.get(key, s)
+                if s > ps:
+                    ps = s
+                else:
+                    ps = ps + (s - ps) * min(1.0, a * 2.0)
+                self._sm_scale[key] = ps
+                np.multiply(res, ps, out=out)
+            else:
+                out[:] = res
+
+        np.clip(out, -lim, lim, out=out)
+        return out
 
     @staticmethod
     def _db(x):

@@ -3,6 +3,7 @@
 import backend  # noqa: F401  (переменные окружения и GL-конфиг — до numpy/Qt)
 import functools
 import math
+import sys
 from pyqtgraph.Qt import QtCore, QtGui, QtWidgets
 from settings import CONFIG, DEFAULT_CONFIG
 
@@ -28,8 +29,12 @@ THEME_HEX = dict(THEMES)
 DEFAULT_THEME = "mint"
 
 
-# custom theme is allowed; its colour lives in CONFIG["custom_color"]
-if CONFIG.get("theme") not in THEME_HEX and CONFIG.get("theme") != "custom":
+# custom/system themes are allowed; custom colour lives in CONFIG["custom_color"],
+# system colour is read from the OS on demand (system_accent())
+if CONFIG.get("theme") not in THEME_HEX and CONFIG.get("theme") not in (
+    "custom",
+    "system",
+):
     CONFIG["theme"] = DEFAULT_THEME
 
 
@@ -38,6 +43,77 @@ _cc = str(CONFIG.get("custom_color", DEFAULT_CONFIG["custom_color"]))
 
 if not (_cc.startswith("#") and len(_cc) in (4, 7)):
     CONFIG["custom_color"] = DEFAULT_CONFIG["custom_color"]
+
+
+# ── Системный акцент ──────────────────────────────────────────────────────────
+# Windows: реестр (мгновенно, без доп. зависимостей). Иначе — QPalette.Accent
+# (Qt ≥ 6.6: Windows 10/11, macOS и часть Linux-окружений).
+# минимальная яркость (HSV) — тёмный акцент не «тонет» на тёмном фоне
+_SYS_MIN_V = 190
+
+
+def _win_accent_hex():
+    try:
+        import winreg
+    except Exception:
+        return None
+    # (ветка, значение, порядок байт). AccentColor/AccentColorMenu — ABGR,
+    # ColorizationColor — ARGB.
+    sources = (
+        (r"Software\Microsoft\Windows\DWM", "AccentColor", "abgr"),
+        (
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent",
+            "AccentColorMenu",
+            "abgr",
+        ),
+        (r"Software\Microsoft\Windows\DWM", "ColorizationColor", "argb"),
+    )
+    for sub, name, order in sources:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, sub) as k:
+                v, _ = winreg.QueryValueEx(k, name)
+        except OSError:
+            continue
+        try:
+            v = int(v) & 0xFFFFFFFF
+        except Exception:
+            continue
+        if order == "abgr":
+            r, g, b = v & 0xFF, (v >> 8) & 0xFF, (v >> 16) & 0xFF
+        else:
+            r, g, b = (v >> 16) & 0xFF, (v >> 8) & 0xFF, v & 0xFF
+        return f"#{r:02x}{g:02x}{b:02x}"
+    return None
+
+
+def _qt_accent_hex():
+    try:
+        role = getattr(QtGui.QPalette.ColorRole, "Accent", None)
+        if role is None:  # Qt < 6.6
+            return None
+        c = QtGui.QGuiApplication.palette().color(role)
+        return c.name() if c.isValid() else None
+    except Exception:
+        return None
+
+
+def readable_accent(hex_color: str) -> str:
+    """Поднимает яркость слишком тёмного цвета, сохраняя оттенок: интерфейс
+    рисует тёмный текст на акценте и линию на тёмном фоне."""
+    c = QtGui.QColor(hex_color)
+    h, s, v, _a = c.getHsv()
+    if v >= _SYS_MIN_V:
+        return c.name()
+    return QtGui.QColor.fromHsv(max(h, 0), s, _SYS_MIN_V).name()
+
+
+def system_accent():
+    """Цвет акцента системы (#rrggbb, уже приведённый к читаемому виду)
+    или None, если определить не удалось."""
+    raw = _win_accent_hex() if sys.platform == "win32" else None
+    if raw is None:
+        raw = _qt_accent_hex()
+    return readable_accent(raw) if raw else None
 
 
 @functools.lru_cache(maxsize=256)
