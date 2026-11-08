@@ -67,6 +67,7 @@ python pc_waveform.py
 ## Кратко о программе
 
 Это осциллограф системного звука на Python: `soundcard` захватывает WASAPI-loopback в кольцевой буфер (моно + L + R), UI на `pyqtgraph` рисует кривую (с триггером/стабилизацией, свечением, затуханием краёв), а рядом — плашки PEAK/RMS/Hz/FPS/бэкенд. Есть темы, i18n (ru/uk/en), соло-режим (ПКМ → безрамочное окно с прозрачным фоном), автовыбор бэкенда (OpenGL/Vulkan/Raster), и очень много микрооптимизаций под hot-path: preallocated буферы, in-place `multiply/clip`, зеркальный кольцевой буфер, даунсэмплинг, ленивое создание glow-объектов, GC freeze.
+Подробнее прочитать можно [здесь](https://deepwiki.com/riverya4life/PC-Waveform/1-overview)
 
 ---
 
