@@ -1,5 +1,7 @@
 """Константы, настройки (INI в %APPDATA%/PC Waveform/settings.ini) и локализация ru/uk/en."""
 
+from io import TextIOWrapper
+
 import backend  # noqa: F401
 import configparser
 import os
@@ -10,6 +12,8 @@ CHUNK = 256
 UPDATE_MS = 1
 STATS_MS = 50
 HZ_EST_SAMPLES = 4096
+BPM_HISTORY_SAMPLES = 4096
+BASS_HISTORY_SAMPLES = 8192
 FPS_AVG_S = 0.25
 SLOW_STATS_S = 0.25
 WATCHDOG_MS = 16
@@ -17,20 +21,20 @@ MAX_N = 32768
 TRIGGER_MAX_AGE = 1536
 MAX_CH = 8
 
-SAMPLE_OPTIONS = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
-GAIN_OPTIONS = [1, 2, 4, 8]
-FPS_OPTIONS = [0, -1, 30, 60, 75, 90, 120, 144, 165, 240]
+SAMPLE_OPTIONS: list[int] = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+GAIN_OPTIONS: list[int] = [1, 2, 4, 8]
+FPS_OPTIONS: list[int] = [0, -1, 30, 60, 75, 90, 120, 144, 165, 240]
 
-CHANNEL_LAYOUTS = [
+CHANNEL_LAYOUTS: list[tuple[str, int, str]] = [
     ("mono", 1, "mono"),
     ("stereo", 2, "stereo"),
     ("quad", 4, "quad"),
     ("5.1", 6, "5_1"),
     ("7.1", 8, "7_1"),
 ]
-CH_LAYOUT_TO_N = {k: n for k, n, _ in CHANNEL_LAYOUTS}
+CH_LAYOUT_TO_N: dict[str, int] = {k: n for k, n, _ in CHANNEL_LAYOUTS}
 
-TICKS = {
+TICKS: dict[int, int] = {
     256: 64,
     512: 128,
     1024: 250,
@@ -46,7 +50,7 @@ DEMO_EDGE = 0.12
 
 def _config_dir() -> str:
     if sys.platform == "win32":
-        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        base: str = os.environ.get("APPDATA") or os.path.expanduser("~")
     else:
         base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
             os.path.expanduser("~"), ".config"
@@ -54,7 +58,7 @@ def _config_dir() -> str:
     return os.path.join(base, "PC Waveform")
 
 
-CONFIG_PATH = os.path.join(_config_dir(), "settings.ini")
+CONFIG_PATH: str = os.path.join(_config_dir(), "settings.ini")
 
 DEFAULT_CONFIG = {
     "lang": "ru",
@@ -68,12 +72,15 @@ DEFAULT_CONFIG = {
     "fade": True,
     "custom_color": "#ff6bcb",
     "fps": 0,
+    "fps_customized": False,
     "bandpass": "off",
     "gradient": False,
     "peak_hold": True,
     "bpm_on": True,
     "smooth_stab": True,
     "edge_clip": False,
+    "solo_geom": None,
+    "solo_pinned": False,
 }
 
 
@@ -81,6 +88,20 @@ def _bool(v) -> bool:
     if isinstance(v, bool):
         return v
     return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _parse_geom(v):
+    """Геометрия окна: (x, y, w, h) из кортежа/строки «x,y,w,h» или None."""
+    if v is None:
+        return None
+    try:
+        parts = v if isinstance(v, (list, tuple)) else str(v).split(",")
+        x, y, w, h = (int(float(p)) for p in parts)
+    except Exception:
+        return None
+    if not (100 <= w <= 10000 and 60 <= h <= 10000):
+        return None
+    return (x, y, w, h)
 
 
 def _validate(cfg: dict) -> dict:
@@ -118,14 +139,28 @@ def _validate(cfg: dict) -> dict:
     if cfg.get("bandpass") not in ("off", "low", "mid", "high"):
         cfg["bandpass"] = "off"
 
-    for k in ("gradient", "peak_hold", "bpm_on", "smooth_stab", "edge_clip"):
+    for k in (
+        "gradient",
+        "peak_hold",
+        "bpm_on",
+        "smooth_stab",
+        "edge_clip",
+        "solo_pinned",
+    ):
         cfg[k] = _bool(cfg.get(k, DEFAULT_CONFIG[k]))
+
+    cfg["solo_geom"] = _parse_geom(cfg.get("solo_geom"))
+
+    cfg["fps_customized"] = _bool(cfg.get("fps_customized", False))
+    if cfg["fps"] == 0 and not cfg["fps_customized"]:
+        cfg["fps"] = DEFAULT_CONFIG["fps"]
 
     did = cfg.get("device_id")
     if did is not None and str(did).strip() in ("", "None", "null"):
         cfg["device_id"] = None
     elif did is not None:
         cfg["device_id"] = str(did)
+
     return cfg
 
 
@@ -138,8 +173,8 @@ def _load_from_ini(path: str):
         return None
     cfg = dict(DEFAULT_CONFIG)
     if cp.has_section("ui"):
-        s = cp["ui"]
-        for k in ("lang", "theme", "ch_layout", "custom_color", "bandpass"):
+        s: configparser.SectionProxy = cp["ui"]
+        for k in ("lang", "theme", "ch_layout", "custom_color", "bandpass", "solo_geom"):
             if k in s:
                 cfg[k] = s.get(k)
         for k in ("n", "gain", "fps"):
@@ -157,11 +192,13 @@ def _load_from_ini(path: str):
             "bpm_on",
             "smooth_stab",
             "edge_clip",
+            "solo_pinned",
+            "fps_customized",
         ):
             if k in s:
                 cfg[k] = s.getboolean(k, DEFAULT_CONFIG[k])
     if cp.has_section("audio") and "device_id" in cp["audio"]:
-        v = cp["audio"].get("device_id", "").strip()
+        v: str = cp["audio"].get("device_id", "").strip()
         cfg["device_id"] = v if v and v.lower() not in ("none", "null") else None
     return cfg
 
@@ -174,7 +211,7 @@ def _load_config() -> dict:
     return _validate(dict(DEFAULT_CONFIG))
 
 
-def _save_config(cfg: dict):
+def _save_config(cfg: dict) -> None:
     try:
         os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
         cp = configparser.ConfigParser()
@@ -193,13 +230,21 @@ def _save_config(cfg: dict):
                 cfg.get("custom_color", DEFAULT_CONFIG["custom_color"])
             ),
             "fps": str(int(cfg.get("fps", 0))),
+            "fps_customized": (
+                "true" if _bool(cfg.get("fps_customized", False)) else "false"
+            ),
             "bandpass": str(cfg.get("bandpass", "off")),
-            "gradient": "true" if _bool(cfg.get("gradient", False)) else "false",
-            "peak_hold": "true" if _bool(cfg.get("peak_hold", True)) else "false",
+            "gradient": ("true" if _bool(cfg.get("gradient", False)) else "false"),
+            "peak_hold": ("true" if _bool(cfg.get("peak_hold", True)) else "false"),
             "bpm_on": "true" if _bool(cfg.get("bpm_on", True)) else "false",
-            "smooth_stab": "true" if _bool(cfg.get("smooth_stab", True)) else "false",
-            "edge_clip": "true" if _bool(cfg.get("edge_clip", True)) else "false",
+            "smooth_stab": ("true" if _bool(cfg.get("smooth_stab", True)) else "false"),
+            "edge_clip": ("true" if _bool(cfg.get("edge_clip", True)) else "false"),
         }
+        cp["ui"]["solo_pinned"] = (
+            "true" if _bool(cfg.get("solo_pinned", False)) else "false"
+        )
+        geom = _parse_geom(cfg.get("solo_geom"))
+        cp["ui"]["solo_geom"] = ",".join(str(v) for v in geom) if geom else ""
         did = cfg.get("device_id")
         cp["audio"] = {"device_id": "" if did is None else str(did)}
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -210,10 +255,14 @@ def _save_config(cfg: dict):
 
 CONFIG = _load_config()
 
-LANGUAGES = [("Русский", "ru"), ("Українська", "uk"), ("English", "en")]
+LANGUAGES: list[tuple[str, str]] = [
+    ("Русский", "ru"),
+    ("Українська", "uk"),
+    ("English", "en"),
+]
 LANG = {"current": CONFIG["lang"]}
 
-TRANSLATIONS = {
+TRANSLATIONS: dict[str, dict[str, str]] = {
     "ru": {
         "brand": "PC Waveform",
         "main_title": "PC Waveform — осциллограмма системного звука (github: riverya4life)",
@@ -259,6 +308,22 @@ TRANSLATIONS = {
         "clip": "CLIP",
         "paused": "пауза",
         "error_prefix": "Ошибка:",
+        "audio_error_title": "Ошибка захвата аудио",
+        "audio_error_click_details": "Нажмите, чтобы посмотреть подробности",
+        "audio_error_hint": "Проверьте подключение устройства. Технические подробности можно открыть отдельно.",
+        "audio_error_show_details": "Технические детали",
+        "audio_error_hide_details": "Скрыть детали",
+        "close": "Закрыть",
+        "audio_error_device": "Устройство",
+        "audio_error_device_id": "ID устройства",
+        "audio_error_sample_rate": "Частота дискретизации",
+        "audio_error_block_size": "Размер блока",
+        "audio_error_channels": "Запрошено каналов",
+        "audio_error_type": "Тип ошибки",
+        "audio_error_message": "Сообщение",
+        "audio_error_raw": "Данные исключения",
+        "audio_error_traceback": "Стек вызовов",
+        "audio_error_unknown_type": "неизвестно",
         "searching": "поиск устройства…",
         "no_devices": "(нет устройств)",
         "solo_tip": "ПКМ — режим «соло»",
@@ -352,6 +417,22 @@ TRANSLATIONS = {
         "clip": "CLIP",
         "paused": "пауза",
         "error_prefix": "Помилка:",
+        "audio_error_title": "Помилка захоплення аудіо",
+        "audio_error_click_details": "Натисніть, щоб переглянути подробиці",
+        "audio_error_hint": "Перевірте підключення пристрою. Технічні подробиці можна відкрити окремо.",
+        "audio_error_show_details": "Технічні деталі",
+        "audio_error_hide_details": "Сховати деталі",
+        "close": "Закрити",
+        "audio_error_device": "Пристрій",
+        "audio_error_device_id": "ID пристрою",
+        "audio_error_sample_rate": "Частота дискретизації",
+        "audio_error_block_size": "Розмір блока",
+        "audio_error_channels": "Запитано каналів",
+        "audio_error_type": "Тип помилки",
+        "audio_error_message": "Повідомлення",
+        "audio_error_raw": "Дані винятку",
+        "audio_error_traceback": "Стек викликів",
+        "audio_error_unknown_type": "невідомо",
         "searching": "пошук пристрою…",
         "no_devices": "(немає пристроїв)",
         "solo_tip": "ПКМ — режим «соло»",
@@ -445,6 +526,22 @@ TRANSLATIONS = {
         "clip": "CLIP",
         "paused": "paused",
         "error_prefix": "Error:",
+        "audio_error_title": "Audio capture error",
+        "audio_error_click_details": "Click to view details",
+        "audio_error_hint": "Check the device connection. Technical details can be opened separately.",
+        "audio_error_show_details": "Technical details",
+        "audio_error_hide_details": "Hide details",
+        "close": "Close",
+        "audio_error_device": "Device",
+        "audio_error_device_id": "Device ID",
+        "audio_error_sample_rate": "Sample rate",
+        "audio_error_block_size": "Block size",
+        "audio_error_channels": "Channels requested",
+        "audio_error_type": "Error type",
+        "audio_error_message": "Message",
+        "audio_error_raw": "Exception details",
+        "audio_error_traceback": "Traceback",
+        "audio_error_unknown_type": "unknown",
         "searching": "searching device…",
         "no_devices": "(no devices)",
         "solo_tip": "RMB — solo mode",
@@ -497,7 +594,7 @@ TRANSLATIONS = {
 
 
 def tr(key: str) -> str:
-    d = TRANSLATIONS.get(LANG["current"], TRANSLATIONS["ru"])
+    d: dict[str, str] = TRANSLATIONS.get(LANG["current"], TRANSLATIONS["ru"])
     return d.get(key, key)
 
 

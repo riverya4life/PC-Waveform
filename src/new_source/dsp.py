@@ -1,5 +1,7 @@
 """Полосовые фильтры (RBJ cookbook, биквад)."""
 
+from typing import Any
+
 import numpy as np
 from settings import SAMPLERATE
 
@@ -12,7 +14,7 @@ except ImportError:
 
 
 class Biquad:
-    def __init__(self):
+    def __init__(self) -> None:
         self.b0 = 1.0
         self.b1 = 0.0
         self.b2 = 0.0
@@ -20,11 +22,15 @@ class Biquad:
         self.a2 = 0.0
         self.z1 = 0.0
         self.z2 = 0.0
-        self._b = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-        self._a = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-        self._zi = np.zeros(2, dtype=np.float64)
+        self._b: np.ndarray[Any, np.dtype[np.floating]] = np.array(
+            [1.0, 0.0, 0.0], dtype=np.float64
+        )
+        self._a: np.ndarray[Any, np.dtype[np.floating]] = np.array(
+            [1.0, 0.0, 0.0], dtype=np.float64
+        )
+        self._zi: np.ndarray[Any, np.dtype[np.floating]] = np.zeros(2, dtype=np.float64)
 
-    def _design(self, b0, b1, b2, a0, a1, a2):
+    def _design(self, b0, b1, b2, a0, a1, a2) -> None:
         self.b0 = b0 / a0
         self.b1 = b1 / a0
         self.b2 = b2 / a0
@@ -33,27 +39,32 @@ class Biquad:
         self._b[:] = (self.b0, self.b1, self.b2)
         self._a[:] = (1.0, self.a1, self.a2)
 
-    def lowpass(self, fc: float, q: float = 0.707):
-        w0 = 2.0 * np.pi * fc / SAMPLERATE
+    def lowpass(self, fc: float, q: float = 0.707) -> None:
+        w0: float = 2.0 * np.pi * fc / SAMPLERATE
         cw, sw = np.cos(w0), np.sin(w0)
         alpha = sw / (2.0 * q)
         self._design((1 - cw) / 2, 1 - cw, (1 - cw) / 2, 1 + alpha, -2 * cw, 1 - alpha)
 
-    def highpass(self, fc: float, q: float = 0.707):
-        w0 = 2.0 * np.pi * fc / SAMPLERATE
+    def highpass(self, fc: float, q: float = 0.707) -> None:
+        w0: float = 2.0 * np.pi * fc / SAMPLERATE
         cw, sw = np.cos(w0), np.sin(w0)
         alpha = sw / (2.0 * q)
         self._design(
-            (1 + cw) / 2, -(1 + cw), (1 + cw) / 2, 1 + alpha, -2 * cw, 1 - alpha
+            (1 + cw) / 2,
+            -(1 + cw),
+            (1 + cw) / 2,
+            1 + alpha,
+            -2 * cw,
+            1 - alpha,
         )
 
-    def bandpass(self, fc: float, q: float = 1.0):
-        w0 = 2.0 * np.pi * fc / SAMPLERATE
+    def bandpass(self, fc: float, q: float = 1.0) -> None:
+        w0: float = 2.0 * np.pi * fc / SAMPLERATE
         cw, sw = np.cos(w0), np.sin(w0)
         alpha = sw / (2.0 * q)
         self._design(alpha, 0.0, -alpha, 1 + alpha, -2 * cw, 1 - alpha)
 
-    def reset(self):
+    def reset(self) -> None:
         self.z1 = self.z2 = 0.0
         self._zi[:] = 0.0
 
@@ -61,7 +72,10 @@ class Biquad:
         if _HAS_SCIPY:
             try:
                 y, self._zi = _lfilter(
-                    self._b, self._a, x.astype(np.float64, copy=False), zi=self._zi
+                    self._b,
+                    self._a,
+                    x.astype(np.float64, copy=False),
+                    zi=self._zi,
                 )
                 out[: len(y)] = y.astype(np.float32, copy=False)
                 return out
@@ -80,14 +94,14 @@ class Biquad:
         return out
 
 
-_PRESETS = {
+_PRESETS: dict[str, tuple[str, float, float]] = {
     "low": ("lowpass", 200.0, 0.707),
     "mid": ("bandpass", 1000.0, 1.2),
     "high": ("highpass", 4000.0, 0.707),
 }
 
 
-def make_filter(kind: str):
+def make_filter(kind: str) -> None | Biquad:
     if not kind or kind == "off" or kind not in _PRESETS:
         return None
     q = Biquad()
